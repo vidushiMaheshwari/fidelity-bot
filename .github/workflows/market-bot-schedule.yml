@@ -1,0 +1,131 @@
+name: market-bot-daily
+
+on:
+  schedule:
+    # Example: 15:30 UTC, roughly 7:30 AM PT (adjust for DST automatically).
+    - cron: "30 15 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      owned_symbols:
+        description: "Comma-separated owned symbols (optional if owned watchlist file is set)."
+        required: false
+      owned_watchlist_path:
+        description: "Path to owned symbols file (optional)."
+        required: false
+      buy_symbols:
+        description: "Comma-separated buy-scan symbols (optional)."
+        required: false
+      buy_watchlist_path:
+        description: "Path to buy watchlist file (optional)."
+        required: false
+
+jobs:
+  analyze-market:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      USER_ID: me
+      USER_ROOT: data/user
+      RUN_RISK_PROFILE: ${{ vars.MARKET_BOT_RISK_PROFILE != '' && vars.MARKET_BOT_RISK_PROFILE || 'moderate' }}
+      RUN_CONFIDENCE_THRESHOLD: ${{ vars.MARKET_BOT_CONFIDENCE_THRESHOLD != '' && vars.MARKET_BOT_CONFIDENCE_THRESHOLD || '0.00' }}
+      RUN_CRITICALITY_THRESHOLD: ${{ vars.MARKET_BOT_CRITICALITY_THRESHOLD != '' && vars.MARKET_BOT_CRITICALITY_THRESHOLD || '0.00' }}
+      RUN_MIN_CRITICAL_CONFIDENCE: ${{ vars.MARKET_BOT_MIN_CRITICAL_CONFIDENCE != '' && vars.MARKET_BOT_MIN_CRITICAL_CONFIDENCE || '0.60' }}
+      RUN_HISTORY_DAYS: ${{ vars.MARKET_BOT_HISTORY_DAYS != '' && vars.MARKET_BOT_HISTORY_DAYS || '90' }}
+      OWNED_SYMBOLS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.owned_symbols || vars.MARKET_BOT_OWNED_SYMBOLS || '' }}
+      OWNED_WATCHLIST_PATH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.owned_watchlist_path || vars.MARKET_BOT_OWNED_WATCHLIST_PATH || '' }}
+      BUY_SYMBOLS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.buy_symbols || vars.MARKET_BOT_BUY_SYMBOLS || '' }}
+      BUY_WATCHLIST_PATH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.buy_watchlist_path || vars.MARKET_BOT_BUY_WATCHLIST_PATH || '' }}
+      PORTFOLIO_HOLDINGS_PATH: ${{ vars.MARKET_BOT_PORTFOLIO_HOLDINGS_PATH || 'data/user/me/portfolio_holdings.csv' }}
+      PORTFOLIO_LEDGER_PATH: ${{ vars.MARKET_BOT_PORTFOLIO_LEDGER_PATH || 'data/user/me/portfolio_ledger.csv' }}
+      ANALYTICS_DB_PATH: ${{ secrets.SUPABASE_DATABASE_URL || vars.MARKET_BOT_ANALYTICS_DB_URL || vars.MARKET_BOT_ANALYTICS_DB_PATH || 'data/user/me/analytics.db' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run scheduled analysis
+        id: run-analysis
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "$PORTFOLIO_HOLDINGS_PATH" ]; then
+            mkdir -p "$(dirname "$PORTFOLIO_HOLDINGS_PATH")"
+            printf "symbol,shares,cost_basis\n" > "$PORTFOLIO_HOLDINGS_PATH"
+          fi
+          if [ ! -f "$PORTFOLIO_LEDGER_PATH" ]; then
+            mkdir -p "$(dirname "$PORTFOLIO_LEDGER_PATH")"
+            printf "trade_date,action,symbol,shares,price,fee,currency,notes\n" > "$PORTFOLIO_LEDGER_PATH"
+          fi
+
+          args=(
+            "schedule"
+            "--run-now"
+            "--risk-profile" "$RUN_RISK_PROFILE"
+            "--confidence-threshold" "$RUN_CONFIDENCE_THRESHOLD"
+            "--criticality-threshold" "$RUN_CRITICALITY_THRESHOLD"
+            "--min-critical-confidence" "$RUN_MIN_CRITICAL_CONFIDENCE"
+            "--history-days" "$RUN_HISTORY_DAYS"
+            "--portfolio-holdings" "$PORTFOLIO_HOLDINGS_PATH"
+            "--portfolio-ledger" "$PORTFOLIO_LEDGER_PATH"
+            "--db-path" "$ANALYTICS_DB_PATH"
+            "--user-id" "$USER_ID"
+            "--user-root" "$USER_ROOT"
+            "--output-json"
+          )
+
+          if [ -n "${OWNED_SYMBOLS}" ]; then
+            args+=(--owned-symbols "$OWNED_SYMBOLS")
+          fi
+          if [ -n "${OWNED_WATCHLIST_PATH}" ]; then
+            if [ ! -f "$OWNED_WATCHLIST_PATH" ]; then
+              echo "Owned watchlist file not found: $OWNED_WATCHLIST_PATH" >&2
+              exit 1
+            fi
+            args+=(--owned-watchlist "$OWNED_WATCHLIST_PATH")
+          fi
+          if [ -n "${BUY_SYMBOLS}" ]; then
+            args+=(--buy-symbols "$BUY_SYMBOLS")
+          fi
+          if [ -n "${BUY_WATCHLIST_PATH}" ]; then
+            if [ ! -f "$BUY_WATCHLIST_PATH" ]; then
+              echo "Buy watchlist file not found: $BUY_WATCHLIST_PATH" >&2
+              exit 1
+            fi
+            args+=(--buy-watchlist "$BUY_WATCHLIST_PATH")
+          fi
+          if [ -z "${OWNED_SYMBOLS}" ] && [ -z "${OWNED_WATCHLIST_PATH}" ] && [ -z "${BUY_SYMBOLS}" ] && [ -z "${BUY_WATCHLIST_PATH}" ]; then
+            echo "No owned/buy inputs provided; configure workflow_dispatch inputs or repository variables." >&2
+            exit 1
+          fi
+
+          output_path="$RUNNER_TEMP/market-bot-output.json"
+          python -m market_bot.cli "${args[@]}" | tee "$output_path"
+          echo "output_path=$output_path" >> "$GITHUB_OUTPUT"
+
+      - name: Upload analysis payload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-bot-latest-run
+          path: ${{ steps.run-analysis.outputs.output_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload analytics DB
+        if: always() && !contains(env.ANALYTICS_DB_PATH, '://')
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-bot-analytics-db
+          path: ${{ env.ANALYTICS_DB_PATH }}
+          if-no-files-found: warn
+          retention-days: 30

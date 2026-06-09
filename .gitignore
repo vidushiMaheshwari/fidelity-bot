@@ -1,0 +1,14 @@
+# Local market bot state (not for source control)
+/data/user/*/analytics.db
+/data/user/*/analytics.sqlite
+/data/user/*/analytics.db-wal
+/data/user/*/portfolio_holdings.csv
+/data/user/*/portfolio_ledger.csv
+/data/analytics.db
+/data/*.db
+/data/user/*/*.csv
+
+# Local environment/config artifacts that may contain secrets
+/.venv/
+/__pycache__/
+*.pyc
