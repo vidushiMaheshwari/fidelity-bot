@@ -39,6 +39,7 @@ jobs:
       PORTFOLIO_HOLDINGS_PATH: ${{ vars.MARKET_BOT_PORTFOLIO_HOLDINGS_PATH || 'data/user/me/portfolio_holdings.csv' }}
       PORTFOLIO_LEDGER_PATH: ${{ vars.MARKET_BOT_PORTFOLIO_LEDGER_PATH || 'data/user/me/portfolio_ledger.csv' }}
       ANALYTICS_DB_PATH: ${{ secrets.SUPABASE_DATABASE_URL || vars.MARKET_BOT_ANALYTICS_DB_URL || vars.MARKET_BOT_ANALYTICS_DB_PATH || 'data/user/me/analytics.db' }}
+      MARKET_BOT_FALLBACK_SYMBOLS: ${{ vars.MARKET_BOT_FALLBACK_SYMBOLS || '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -60,16 +61,16 @@ jobs:
 
           output_path="$RUNNER_TEMP/market-bot-output.json"
           : > "$output_path"
-          trap 'echo "output_path=$output_path" >> "$GITHUB_OUTPUT"' EXIT
+
           resolved_owned_symbols="${OWNED_SYMBOLS}"
           resolved_buy_symbols="${BUY_SYMBOLS}"
 
+          mkdir -p "$(dirname "$PORTFOLIO_HOLDINGS_PATH")"
+          mkdir -p "$(dirname "$PORTFOLIO_LEDGER_PATH")"
           if [ ! -f "$PORTFOLIO_HOLDINGS_PATH" ]; then
-            mkdir -p "$(dirname "$PORTFOLIO_HOLDINGS_PATH")"
             printf "symbol,shares,cost_basis\n" > "$PORTFOLIO_HOLDINGS_PATH"
           fi
           if [ ! -f "$PORTFOLIO_LEDGER_PATH" ]; then
-            mkdir -p "$(dirname "$PORTFOLIO_LEDGER_PATH")"
             printf "trade_date,action,symbol,shares,price,fee,currency,notes\n" > "$PORTFOLIO_LEDGER_PATH"
           fi
 
@@ -84,6 +85,7 @@ jobs:
             "--portfolio-holdings" "$PORTFOLIO_HOLDINGS_PATH"
             "--portfolio-ledger" "$PORTFOLIO_LEDGER_PATH"
             "--db-path" "$ANALYTICS_DB_PATH"
+            "--use-portfolio-db"
             "--user-id" "$USER_ID"
             "--user-root" "$USER_ROOT"
             "--output-json"
@@ -110,13 +112,41 @@ jobs:
             args+=(--buy-watchlist "$BUY_WATCHLIST_PATH")
           fi
           if [ -z "${resolved_owned_symbols}" ] && [ -z "${resolved_buy_symbols}" ] && [ -z "${OWNED_WATCHLIST_PATH}" ] && [ -z "${BUY_WATCHLIST_PATH}" ]; then
-            if [ -f "$PORTFOLIO_HOLDINGS_PATH" ]; then
-              resolved_owned_symbols="$(awk -F, '
-                NR > 1 && $1 != "" {
-                  gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1)
-                  print toupper($1)
-                }
-              ' "$PORTFOLIO_HOLDINGS_PATH" | awk '!seen[$0]++' | paste -sd, -)"
+            if [ -s "$PORTFOLIO_HOLDINGS_PATH" ]; then
+              resolved_owned_symbols="$(awk -F, 'NR > 1 && $1 != "" { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print toupper($1) }' "$PORTFOLIO_HOLDINGS_PATH" | awk '!seen[$0]++' | paste -sd, -)"
+            fi
+            if [ -z "$resolved_owned_symbols" ] && [ -n "${ANALYTICS_DB_PATH}" ]; then
+              resolved_owned_symbols="$(python3 - "$ANALYTICS_DB_PATH" <<'PY'
+                import sys
+
+                from market_bot.storage import connect_db, load_portfolio_holdings
+
+
+                def main(path: str) -> None:
+                    try:
+                        conn = connect_db(path)
+                        symbols = [
+                            holding.symbol.upper()
+                            for holding in load_portfolio_holdings(conn)
+                            if holding.symbol
+                        ]
+                        conn.close()
+                    except Exception:
+                        symbols = []
+
+                    if symbols:
+                        seen = set()
+                        deduped = []
+                        for symbol in symbols:
+                            if symbol not in seen:
+                                seen.add(symbol)
+                                deduped.append(symbol)
+                        print(",".join(deduped))
+
+
+                if __name__ == "__main__":
+                    main(sys.argv[1])
+              PY)"
             fi
 
             if [ -n "$resolved_owned_symbols" ]; then
@@ -124,8 +154,14 @@ jobs:
               if [ -z "$resolved_buy_symbols" ] && [ -z "${BUY_WATCHLIST_PATH}" ]; then
                 args+=(--buy-symbols "$resolved_owned_symbols")
               fi
+            elif [ -n "${MARKET_BOT_FALLBACK_SYMBOLS}" ]; then
+              resolved_owned_symbols="${MARKET_BOT_FALLBACK_SYMBOLS}"
+              echo "Falling back to configured fallback symbols: $resolved_owned_symbols" >&2
+              args+=(--owned-symbols "$resolved_owned_symbols")
+              args+=(--buy-symbols "$resolved_owned_symbols")
             else
-              echo "No owned/buy inputs provided and no symbols found in $PORTFOLIO_HOLDINGS_PATH; configure workflow_dispatch inputs or repository variables." >&2
+              echo "No owned/buy inputs provided and no symbols found in holdings file, DB, or fallback list." >&2
+              echo "Configure workflow_dispatch inputs or repository variables: MARKET_BOT_OWNED_SYMBOLS/BUY_SYMBOLS, watchlist paths, or MARKET_BOT_FALLBACK_SYMBOLS." >&2
               exit 1
             fi
           fi
@@ -140,11 +176,11 @@ jobs:
           fi
 
       - name: Upload analysis payload
-        if: always() && steps.run-analysis.outputs.output_path != ''
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: market-bot-latest-run
-          path: ${{ steps.run-analysis.outputs.output_path }}
+          path: ${{ runner.temp }}/market-bot-output.json
           if-no-files-found: error
           retention-days: 30
 
