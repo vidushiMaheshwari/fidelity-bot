@@ -61,6 +61,8 @@ jobs:
           output_path="$RUNNER_TEMP/market-bot-output.json"
           : > "$output_path"
           trap 'echo "output_path=$output_path" >> "$GITHUB_OUTPUT"' EXIT
+          resolved_owned_symbols="${OWNED_SYMBOLS}"
+          resolved_buy_symbols="${BUY_SYMBOLS}"
 
           if [ ! -f "$PORTFOLIO_HOLDINGS_PATH" ]; then
             mkdir -p "$(dirname "$PORTFOLIO_HOLDINGS_PATH")"
@@ -87,8 +89,8 @@ jobs:
             "--output-json"
           )
 
-          if [ -n "${OWNED_SYMBOLS}" ]; then
-            args+=(--owned-symbols "$OWNED_SYMBOLS")
+          if [ -n "$resolved_owned_symbols" ]; then
+            args+=(--owned-symbols "$resolved_owned_symbols")
           fi
           if [ -n "${OWNED_WATCHLIST_PATH}" ]; then
             if [ ! -f "$OWNED_WATCHLIST_PATH" ]; then
@@ -97,8 +99,8 @@ jobs:
             fi
             args+=(--owned-watchlist "$OWNED_WATCHLIST_PATH")
           fi
-          if [ -n "${BUY_SYMBOLS}" ]; then
-            args+=(--buy-symbols "$BUY_SYMBOLS")
+          if [ -n "$resolved_buy_symbols" ]; then
+            args+=(--buy-symbols "$resolved_buy_symbols")
           fi
           if [ -n "${BUY_WATCHLIST_PATH}" ]; then
             if [ ! -f "$BUY_WATCHLIST_PATH" ]; then
@@ -107,9 +109,37 @@ jobs:
             fi
             args+=(--buy-watchlist "$BUY_WATCHLIST_PATH")
           fi
-          if [ -z "${OWNED_SYMBOLS}" ] && [ -z "${OWNED_WATCHLIST_PATH}" ] && [ -z "${BUY_SYMBOLS}" ] && [ -z "${BUY_WATCHLIST_PATH}" ]; then
-            echo "No owned/buy inputs provided; configure workflow_dispatch inputs or repository variables." >&2
-            exit 1
+          if [ -z "${resolved_owned_symbols}" ] && [ -z "${resolved_buy_symbols}" ] && [ -z "${OWNED_WATCHLIST_PATH}" ] && [ -z "${BUY_WATCHLIST_PATH}" ]; then
+            if [ -f "$PORTFOLIO_HOLDINGS_PATH" ]; then
+              resolved_owned_symbols="$(python - "$PORTFOLIO_HOLDINGS_PATH" <<'PY'
+import csv
+import sys
+
+
+path = sys.argv[1]
+symbols = []
+seen = set()
+with open(path, newline="") as handle:
+    reader = csv.DictReader(handle)
+    for row in reader:
+        symbol = (row.get("symbol") or "").strip().upper()
+        if symbol and symbol not in seen:
+            symbols.append(symbol)
+            seen.add(symbol)
+print(",".join(symbols))
+PY
+)"
+            fi
+
+            if [ -n "$resolved_owned_symbols" ]; then
+              args+=(--owned-symbols "$resolved_owned_symbols")
+              if [ -z "$resolved_buy_symbols" ] && [ -z "${BUY_WATCHLIST_PATH}" ]; then
+                args+=(--buy-symbols "$resolved_owned_symbols")
+              fi
+            else
+              echo "No owned/buy inputs provided and no symbols found in $PORTFOLIO_HOLDINGS_PATH; configure workflow_dispatch inputs or repository variables." >&2
+              exit 1
+            fi
           fi
 
           set +e
