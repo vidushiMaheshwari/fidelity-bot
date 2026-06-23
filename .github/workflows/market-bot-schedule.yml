@@ -139,7 +139,7 @@ jobs:
                   '        if symbol not in seen:' \
                   '            seen.add(symbol)' \
                   '            deduped.append(symbol)' \
-                  '    print(\",\".join(deduped))' \
+                  '    print(",".join(deduped))' \
                 | python3 - "$ANALYTICS_DB_PATH"
               )"
             fi
