@@ -146,7 +146,8 @@ jobs:
 
                 if __name__ == "__main__":
                     main(sys.argv[1])
-              PY)"
+              PY
+              )"
             fi
 
             if [ -n "$resolved_owned_symbols" ]; then
