@@ -116,37 +116,31 @@ jobs:
               resolved_owned_symbols="$(awk -F, 'NR > 1 && $1 != "" { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print toupper($1) }' "$PORTFOLIO_HOLDINGS_PATH" | awk '!seen[$0]++' | paste -sd, -)"
             fi
             if [ -z "$resolved_owned_symbols" ] && [ -n "${ANALYTICS_DB_PATH}" ]; then
-              resolved_owned_symbols="$(python3 - "$ANALYTICS_DB_PATH" <<'PY'
-                import sys
-
-                from market_bot.storage import connect_db, load_portfolio_holdings
-
-
-                def main(path: str) -> None:
-                    try:
-                        conn = connect_db(path)
-                        symbols = [
-                            holding.symbol.upper()
-                            for holding in load_portfolio_holdings(conn)
-                            if holding.symbol
-                        ]
-                        conn.close()
-                    except Exception:
-                        symbols = []
-
-                    if symbols:
-                        seen = set()
-                        deduped = []
-                        for symbol in symbols:
-                            if symbol not in seen:
-                                seen.add(symbol)
-                                deduped.append(symbol)
-                        print(",".join(deduped))
-
-
-                if __name__ == "__main__":
-                    main(sys.argv[1])
-              PY
+              resolved_owned_symbols="$(
+                printf '%s\n' \
+                  'import sys' \
+                  'from market_bot.storage import connect_db, load_portfolio_holdings' \
+                  '' \
+                  'try:' \
+                  '    conn = connect_db(sys.argv[1])' \
+                  '    symbols = [' \
+                  '        holding.symbol.upper()' \
+                  '        for holding in load_portfolio_holdings(conn)' \
+                  '        if holding.symbol' \
+                  '    ]' \
+                  '    conn.close()' \
+                  'except Exception:' \
+                  '    symbols = []' \
+                  '' \
+                  'if symbols:' \
+                  '    seen = set()' \
+                  '    deduped = []' \
+                  '    for symbol in symbols:' \
+                  '        if symbol not in seen:' \
+                  '            seen.add(symbol)' \
+                  '            deduped.append(symbol)' \
+                  '    print(\",\".join(deduped))' \
+                | python3 - "$ANALYTICS_DB_PATH"
               )"
             fi
 
